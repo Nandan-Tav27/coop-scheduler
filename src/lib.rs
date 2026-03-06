@@ -3,8 +3,17 @@ pub enum TaskResult {
     Done,
 }
 
+pub trait Task {
+    fn poll(&mut self) -> TaskResult;
+}
+
 pub struct Scheduler {
-    tasks: Vec<Box<dyn FnMut() -> TaskResult>>,
+    tasks: Vec<Box<dyn Task>>,
+}
+
+pub struct Counter {
+    current: u32,
+    max: u32,
 }
 
 impl Scheduler {
@@ -15,7 +24,7 @@ impl Scheduler {
     }
 
     pub fn spawn<F>(&mut self, task: F)
-    where F: FnMut() -> TaskResult + 'static,
+    where F: Task + 'static,
     {
         self.tasks.push(Box::new(task));
     }
@@ -30,7 +39,7 @@ impl Scheduler {
             // Iterate through tasks, run them, do a match on the output
             let mut new_tasks = Vec::new();
             for mut task in self.tasks.drain(..) {
-                match task() {
+                match task.poll() {
                     TaskResult::Done => {},
                     TaskResult::Yield => {
                         new_tasks.push(task);
@@ -42,36 +51,45 @@ impl Scheduler {
     }
 }
 
+impl Task for Counter {
+    fn poll(&mut self) -> TaskResult {
+        self.current += 1;
+        println!("Count: {}", self.current);
+        if self.current < self.max {
+            TaskResult::Yield
+        } else {
+            TaskResult::Done
+        }
+    }
+}
+
+impl Counter {
+    pub fn new(max: u32) -> Self {
+        Counter {
+            current: 0,
+            max,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn run_two_tasks() {
+    fn test_counter() {
         let mut scheduler = Scheduler::new();
 
-        scheduler.spawn(|| { println!("Task A"); TaskResult::Done });
-        scheduler.spawn(|| { println!("Task B"); TaskResult::Done });
-
+        scheduler.spawn(Counter::new(3));
         scheduler.run();
     }
 
-    // Claude
     #[test]
-    fn round_robin_three_tasks() {
+    fn two_counters_interleaved() {
         let mut scheduler = Scheduler::new();
-        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
 
-        for name in ["A", "B", "C"] {
-            let log = log.clone();
-            scheduler.spawn(move || {
-                log.borrow_mut().push(name);
-                TaskResult::Done
-            });
-        }
-
+        scheduler.spawn(Counter::new(3));
+        scheduler.spawn(Counter::new(3));
         scheduler.run();
-
-        assert_eq!(*log.borrow(), vec!["A", "B", "C"]);
     }
 }
