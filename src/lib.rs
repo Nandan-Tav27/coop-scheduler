@@ -68,20 +68,6 @@ impl Counter {
     }
 }
 
-// fn block_on<F: Future>(future: F) -> F::Output {
-//     let mut future = pin!(future);
-//
-//     let waker = dummy_waker();
-//     let mut cx = Context::from_waker(&waker);
-//
-//     loop {
-//         match future.as_mut().poll(&mut cx) {
-//             Poll::Pending => {},
-//             Poll::Ready(val) => return val,
-//         }
-//     }
-// }
-
 // Claude
 fn dummy_waker() -> Waker {
     fn no_op(_: *const ()) {}
