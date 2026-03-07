@@ -1,64 +1,22 @@
-pub enum TaskResult {
-    Yield,
-    Done,
-}
-
-pub trait Task {
-    fn poll(&mut self) -> TaskResult;
-}
-
-pub struct Scheduler {
-    tasks: Vec<Box<dyn Task>>,
-}
+use std::future::Future;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::pin::{Pin, pin};
 
 pub struct Counter {
     current: u32,
     max: u32,
 }
 
-impl Scheduler {
-    pub fn new() -> Self {
-        Scheduler {
-            tasks: Vec::new(),
-        }
-    }
+impl Future for Counter {
+    type Output = u32;
 
-    pub fn spawn<F>(&mut self, task: F)
-    where F: Task + 'static,
-    {
-        self.tasks.push(Box::new(task));
-    }
-
-    pub fn run(&mut self) {
-        loop {
-            // Check if queue is empty
-            if self.tasks.is_empty() {
-                break;
-            }
-
-            // Iterate through tasks, run them, do a match on the output
-            let mut new_tasks = Vec::new();
-            for mut task in self.tasks.drain(..) {
-                match task.poll() {
-                    TaskResult::Done => {},
-                    TaskResult::Yield => {
-                        new_tasks.push(task);
-                    },
-                }
-            }
-            self.tasks = new_tasks;
-        }
-    }
-}
-
-impl Task for Counter {
-    fn poll(&mut self) -> TaskResult {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.current += 1;
         println!("Count: {}", self.current);
         if self.current < self.max {
-            TaskResult::Yield
+            Poll::Pending
         } else {
-            TaskResult::Done
+            Poll::Ready(self.max)
         }
     }
 }
@@ -72,24 +30,39 @@ impl Counter {
     }
 }
 
+fn block_on<F: Future>(future: F) -> F::Output {
+    let mut future = pin!(future);
+
+    let waker = dummy_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Pending => {},
+            Poll::Ready(val) => return val,
+        }
+    }
+}
+
+// Claude
+fn dummy_waker() -> Waker {
+    fn no_op(_: *const ()) {}
+    fn clone(_: *const ()) -> RawWaker { dummy_raw_waker() }
+    fn dummy_raw_waker() -> RawWaker {
+        RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, no_op, no_op, no_op))
+    }
+    unsafe { Waker::from_raw(dummy_raw_waker()) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_counter() {
-        let mut scheduler = Scheduler::new();
-
-        scheduler.spawn(Counter::new(3));
-        scheduler.run();
-    }
-
-    #[test]
-    fn two_counters_interleaved() {
-        let mut scheduler = Scheduler::new();
-
-        scheduler.spawn(Counter::new(3));
-        scheduler.spawn(Counter::new(3));
-        scheduler.run();
+    fn test_counter_future() {
+        let counter = Counter::new(3);
+        let counter_result = block_on(counter);
+        assert_eq!(counter_result, 3);
     }
 }
+
