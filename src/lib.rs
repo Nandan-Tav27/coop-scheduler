@@ -1,25 +1,62 @@
 use std::future::Future;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::sync::{Arc, Condvar, Mutex};
+use std::collections::{HashMap, VecDeque};
+use std::task::{Context, Poll, Wake, Waker};
 use std::pin::Pin;
 
-pub struct Executor {
-    tasks: Vec<Pin<Box<dyn Future<Output = ()>>>>,
+#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+struct TaskId(usize);
+
+struct ReadyQueue {
+    queue: Mutex<VecDeque<TaskId>>,
+    condvar: Condvar,
 }
 
-pub struct Counter {
+struct TaskWaker {
+    id: TaskId,
+    ready_queue: Arc<ReadyQueue>,
+}
+
+struct Counter {
     current: u32,
     max: u32,
+}
+
+impl TaskWaker {
+    fn new(id: TaskId, ready_queue: Arc<ReadyQueue>) -> Self {
+        TaskWaker {
+            id,
+            ready_queue,
+        }
+    }
+}
+
+pub struct Executor {
+    tasks: HashMap<TaskId, Pin<Box<dyn Future<Output = ()>>>>,
+    ready_queue: Arc<ReadyQueue>,
+    next_id: usize,
 }
 
 impl Executor {
     pub fn new() -> Self {
         Executor {
-            tasks: Vec::new(),
+            tasks: HashMap::new(),
+            ready_queue: Arc::new(
+                    ReadyQueue {
+                    queue: Mutex::new(VecDeque::new()),
+                    condvar: Condvar::new(),
+                }
+            ),
+            next_id: 1,
         }
     }
 
     pub fn spawn<F: Future<Output = ()> + 'static>(&mut self, future: F)  {
-        self.tasks.push(Box::pin(future));
+        let task_id = TaskId(self.next_id);
+        self.next_id += 1;
+        self.tasks.insert(task_id, Box::pin(future));
+        self.ready_queue.queue.lock().unwrap().push_back(task_id);
+        self.ready_queue.condvar.notify_one();
     }
 
     pub fn run(&mut self) {
@@ -28,19 +65,27 @@ impl Executor {
                 break;
             }
 
-            let mut new_tasks = Vec::new();
-            for mut task in self.tasks.drain(..) {
-                let waker = dummy_waker();
+            let mut queue = self.ready_queue.queue.lock().unwrap();
+            while queue.is_empty() {
+                queue = self.ready_queue.condvar.wait(queue).unwrap();
+            }
+
+            while let Some(task_id) = queue.pop_front() {
+                drop(queue);
+
+                let waker: Waker = Arc::new(TaskWaker::new(task_id, self.ready_queue.clone())).into();
                 let mut cx = Context::from_waker(&waker);
 
+                let task = self.tasks.get_mut(&task_id).unwrap();
                 match task.as_mut().poll(&mut cx) {
                     Poll::Pending => {
-                        new_tasks.push(task)
                     },
-                    Poll::Ready(_) => {},
+                    Poll::Ready(_) => {
+                        self.tasks.remove(&task_id);
+                    },
                 }
+                queue = self.ready_queue.queue.lock().unwrap();
             }
-            self.tasks = new_tasks;
         }
     }
 }
@@ -52,6 +97,7 @@ impl Future for Counter {
         self.current += 1;
         println!("Count: {}", self.current);
         if self.current < self.max {
+            cx.waker().wake_by_ref();
             Poll::Pending
         } else {
             Poll::Ready(())
@@ -60,7 +106,7 @@ impl Future for Counter {
 }
 
 impl Counter {
-    pub fn new(max: u32) -> Self {
+    fn new(max: u32) -> Self {
         Counter {
             current: 0,
             max,
@@ -68,14 +114,11 @@ impl Counter {
     }
 }
 
-// Claude
-fn dummy_waker() -> Waker {
-    fn no_op(_: *const ()) {}
-    fn clone(_: *const ()) -> RawWaker { dummy_raw_waker() }
-    fn dummy_raw_waker() -> RawWaker {
-        RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, no_op, no_op, no_op))
+impl Wake for TaskWaker {
+    fn wake(self: Arc<Self>) {
+        self.ready_queue.queue.lock().unwrap().push_back(self.id);
+        self.ready_queue.condvar.notify_one();
     }
-    unsafe { Waker::from_raw(dummy_raw_waker()) }
 }
 
 #[cfg(test)]
