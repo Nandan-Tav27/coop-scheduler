@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::Duration;
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq)]
 struct TaskId(usize);
@@ -141,6 +142,50 @@ impl<T: 'static> Future for Receiver<T> {
     }
 }
 
+struct TimerState {
+    completed: bool,
+    waker: Option<Waker>,
+}
+
+struct TimerFuture {
+    state: Arc<Mutex<TimerState>>,
+}
+
+impl TimerFuture {
+    fn new(duration: Duration) -> Self {
+        let state = Arc::new(Mutex::new(TimerState {
+            completed: false,
+            waker: None,
+        }));
+
+        let state_clone = state.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(duration);
+            let mut state = state_clone.lock().unwrap();
+            state.completed = true;
+            if let Some(waker) = state.waker.take() {
+                waker.wake();
+            }
+        });
+
+        TimerFuture { state }
+    }
+}
+
+impl Future for TimerFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.completed {
+            Poll::Ready(())
+        } else {
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +202,18 @@ mod tests {
         executor.spawn(async move {
             let val = rx.await;
             assert_eq!(val, 42);
+        });
+
+        executor.run();
+    }
+
+    #[test]
+    fn test_timer() {
+        let mut executor = Executor::new();
+
+        executor.spawn(async move {
+            TimerFuture::new(Duration::from_millis(500)).await;
+            println!("Timer fired!");
         });
 
         executor.run();
