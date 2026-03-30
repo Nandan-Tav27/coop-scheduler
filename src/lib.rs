@@ -55,6 +55,10 @@ impl Executor {
                 break;
             }
 
+            // Why while not if?
+            // You could have spurious wakeups. Effectively the OS could wake up the sleeping
+            // thread for no reason. If that's the case it will just continue execution from
+            // that point on, which is not what we want. So we recheck the condition using while.
             let mut queue = self.ready_queue.queue.lock().unwrap();
             while queue.is_empty() {
                 queue = self.ready_queue.condvar.wait(queue).unwrap();
